@@ -13,7 +13,8 @@ Usage: claude-wt <branch-name> [base-branch]
        claude-wt --clean <branch-name>
 
 Options:
-  -d, --docker-target  Point the main repo (and Docker) to a specific branch.
+  -d, --docker-target  Serve a worktree (or the main checkout) from Docker,
+                       uncommitted changes included. Use 'main' to go back.
   -c, --clean          Remove the worktree and delete the local branch.
   -u, --update         Update claude-wt from GitHub.
   -h, --help           Show this help message.
@@ -49,25 +50,70 @@ git rev-parse --git-dir >/dev/null 2>&1 || {
 REPO_ROOT=$(git worktree list --porcelain | awk 'NR==1 && $1 == "worktree" { print substr($0, 10); exit }')
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
 
-# Point the main checkout at a branch. A branch that is already checked out in a
-# linked worktree needs --ignore-other-worktrees — which is the normal case here,
-# since the whole point is to serve the branch you are working on in a worktree.
-point_docker_to() {
-    local branch="$1"
-    (cd "$REPO_ROOT" && { git checkout "$branch" 2>/dev/null || git checkout --ignore-other-worktrees "$branch"; })
+# --- Docker wiring (override per project via the environment) ---
+COMPOSE_DIR="${CLAUDE_WT_COMPOSE_DIR:-$REPO_ROOT/../platform}"
+COMPOSE_PROJECT="${CLAUDE_WT_COMPOSE_PROJECT:-gmpilot-net}"
+COMPOSE_SERVICE="${CLAUDE_WT_COMPOSE_SERVICE:-rails}"
+PATH_VAR="${CLAUDE_WT_PATH_VAR:-LABNET_PATH}"
+
+# Which directory should Docker serve for this name? A worktree if one exists,
+# otherwise the main checkout.
+resolve_target_dir() {
+    local name="$1"
+
+    if [ -d "$REPO_ROOT/.worktrees/$name" ]; then
+        echo "$REPO_ROOT/.worktrees/$name"
+    elif [ "$name" = "$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)" ] || [ "$name" = "main" ]; then
+        echo "$REPO_ROOT"
+    else
+        return 1
+    fi
 }
 
-# The Docker folder serves the branch's last COMMIT. Anything still uncommitted in
-# that branch's worktree is not what the container runs.
-warn_if_uncommitted() {
-    local branch="$1"
-    local worktree="$REPO_ROOT/.worktrees/$branch"
+# A directory served at /app must not depend on host-absolute symlinks: they do not
+# resolve inside the container. Real files only.
+prepare_for_docker() {
+    local dir="$1"
 
-    [ -d "$worktree" ] || return 0
-    [ -n "$(git -C "$worktree" status --porcelain)" ] || return 0
+    if [ -f "$REPO_ROOT/config/master.key" ]; then
+        if [ -L "$dir/config/master.key" ] || [ ! -e "$dir/config/master.key" ]; then
+            mkdir -p "$dir/config"
+            rm -f "$dir/config/master.key"
+            cp "$REPO_ROOT/config/master.key" "$dir/config/master.key"
+            echo "  └─ Copied config/master.key (a symlink breaks inside Docker)"
+        fi
+    fi
 
-    echo "⚠️  '$worktree' has uncommitted changes."
-    echo "   Docker serves the last commit of '$branch' — commit them, or they will not run."
+    # Compiled CSS is gitignored build output, so a fresh worktree has none and the
+    # app renders unstyled — which also breaks Capybara system specs.
+    if [ -f "$REPO_ROOT/app/assets/builds/tailwind.css" ] && [ ! -f "$dir/app/assets/builds/tailwind.css" ]; then
+        mkdir -p "$dir/app/assets/builds"
+        cp "$REPO_ROOT/app/assets/builds/tailwind.css" "$dir/app/assets/builds/tailwind.css"
+        echo "  └─ Copied app/assets/builds/tailwind.css"
+    fi
+}
+
+# Repoint the bind mount at a directory and recreate the container. This serves the
+# working tree as it is on disk — uncommitted changes included — which is the whole
+# point: test first, commit after.
+point_docker_to() {
+    local target="$1"
+    local env_file="$COMPOSE_DIR/.env"
+
+    if [ ! -d "$COMPOSE_DIR" ]; then
+        echo "❌ Error: compose directory not found at '$COMPOSE_DIR'."
+        echo "   Set CLAUDE_WT_COMPOSE_DIR to point at it."
+        return 1
+    fi
+
+    prepare_for_docker "$target"
+
+    touch "$env_file"
+    grep -v "^${PATH_VAR}=" "$env_file" > "$env_file.tmp" 2>/dev/null || true
+    mv "$env_file.tmp" "$env_file"
+    echo "${PATH_VAR}=${target}" >> "$env_file"
+
+    (cd "$COMPOSE_DIR" && docker compose -p "$COMPOSE_PROJECT" up -d "$COMPOSE_SERVICE")
 }
 
 # --- Handle Docker Target Flag ---
@@ -78,10 +124,15 @@ if [[ "$1" == "-d" || "$1" == "--docker-target" ]]; then
         show_usage
         exit 1
     fi
-    echo "🐳 Pointing main Docker folder to: '$TARGET_BRANCH' ($REPO_ROOT)..."
-    point_docker_to "$TARGET_BRANCH"
-    echo "✅ Docker container is now reading code from branch '$TARGET_BRANCH'!"
-    warn_if_uncommitted "$TARGET_BRANCH"
+    TARGET_DIR=$(resolve_target_dir "$TARGET_BRANCH") || {
+        echo "❌ Error: no worktree at '$REPO_ROOT/.worktrees/$TARGET_BRANCH'."
+        echo "   Create one first:  claude-wt $TARGET_BRANCH"
+        exit 1
+    }
+
+    echo "🐳 Pointing Docker at: $TARGET_DIR"
+    point_docker_to "$TARGET_DIR"
+    echo "✅ Container '$COMPOSE_SERVICE' now serves $TARGET_DIR — uncommitted changes included."
     exit 0
 fi
 
@@ -97,6 +148,13 @@ if [[ "$1" == "-c" || "$1" == "--clean" ]]; then
     WORKTREE_DIR="$REPO_ROOT/.worktrees/$BRANCH_NAME"
 
     echo "🧹 Cleaning up worktree for '$BRANCH_NAME'..."
+
+    # Never leave Docker mounted on a directory that is about to disappear.
+    if grep -qx "${PATH_VAR}=${WORKTREE_DIR}" "$COMPOSE_DIR/.env" 2>/dev/null; then
+        echo "🐳 Docker was serving this worktree — pointing it back at $REPO_ROOT..."
+        point_docker_to "$REPO_ROOT" || true
+    fi
+
     if [ -d "$WORKTREE_DIR" ]; then
         git worktree remove "$WORKTREE_DIR" --force 2>/dev/null || rm -rf "$WORKTREE_DIR"
     fi
@@ -141,12 +199,9 @@ if [ -f "$REPO_ROOT/.env" ] && [ ! -f "$WORKTREE_DIR/.env" ]; then
     echo "  └─ Linked .env"
 fi
 
-# Symlink Rails master key if present
-if [ -f "$REPO_ROOT/config/master.key" ] && [ ! -f "$WORKTREE_DIR/config/master.key" ]; then
-    mkdir -p "$WORKTREE_DIR/config"
-    ln -s "$REPO_ROOT/config/master.key" "$WORKTREE_DIR/config/master.key"
-    echo "  └─ Linked config/master.key"
-fi
+# Rails master key and compiled assets are COPIED, not symlinked — see
+# prepare_for_docker: a host-absolute symlink is a broken link inside the container.
+prepare_for_docker "$WORKTREE_DIR"
 
 # Symlink node_modules if present in root
 if [ -d "$REPO_ROOT/node_modules" ] && [ ! -d "$WORKTREE_DIR/node_modules" ]; then
@@ -161,9 +216,9 @@ if [ -d "$REPO_ROOT/vendor/bundle" ] && [ ! -d "$WORKTREE_DIR/vendor/bundle" ]; 
     echo "  └─ Linked vendor/bundle"
 fi
 
-# --- 3. Auto-point Docker to current worktree branch ---
-echo "🐳 Auto-pointing main directory to '$BRANCH_NAME' for Docker..."
-point_docker_to "$BRANCH_NAME" || echo "  └─ ⚠️ Could not switch $REPO_ROOT to '$BRANCH_NAME'."
+# --- 3. Auto-point Docker at this worktree ---
+echo "🐳 Pointing Docker at $WORKTREE_DIR..."
+point_docker_to "$WORKTREE_DIR" || echo "  └─ ⚠️ Could not repoint Docker. Run 'claude-wt -d $BRANCH_NAME' once it is up."
 
 # --- 4. Launch Claude Code ---
 echo "⚡ Launching Claude Code in isolated worktree..."
