@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/env bash
 
 # ==============================================================================
 # claude-wt: Automated Git Worktree manager for Claude Code CLI
@@ -9,15 +9,19 @@ set -e
 show_usage() {
     cat << EOF
 Usage: claude-wt <branch-name> [base-branch]
+       claude-wt -d <branch-name>
        claude-wt --clean <branch-name>
 
 Options:
-  -c, --clean    Remove the worktree and delete the local branch.
-  -h, --help     Show this help message.
+  -d, --docker-target  Point the main repo (and Docker) to a specific branch.
+  -c, --clean          Remove the worktree and delete the local branch.
+  -u, --update         Update claude-wt from GitHub.
+  -h, --help           Show this help message.
 
 Examples:
   claude-wt feature/login
   claude-wt feature/login main
+  claude-wt -d feature/billing
   claude-wt --clean feature/login
 EOF
 }
@@ -25,7 +29,7 @@ EOF
 # --- Handle Update Flag ---
 if [[ "$1" == "-u" || "$1" == "--update" ]]; then
     echo "🔄 Updating claude-wt from GitHub..."
-    curl -fsSL https://raw.githubusercontent.com/baldipa3/claude-wt-repo/main/claude-wt.sh -o ~/.local/bin/claude-wt
+    curl -fsSL https://raw.githubusercontent.com/baldipa3/claude-wt-repo/main/claude-wt -o ~/.local/bin/claude-wt
     chmod +x ~/.local/bin/claude-wt
     echo "✨ claude-wt has been updated to the latest version!"
     exit 0
@@ -36,6 +40,20 @@ REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "❌ Error: Must be run inside a Git repository."
     exit 1
 }
+
+# --- Handle Docker Target Flag ---
+if [[ "$1" == "-d" || "$1" == "--docker-target" ]]; then
+    TARGET_BRANCH="$2"
+    if [[ -z "$TARGET_BRANCH" ]]; then
+        echo "❌ Error: Branch name required for docker-target."
+        show_usage
+        exit 1
+    fi
+    echo "🐳 Pointing main Docker folder to: '$TARGET_BRANCH'..."
+    (cd "$REPO_ROOT" && git checkout "$TARGET_BRANCH")
+    echo "✅ Docker container is now reading code from branch '$TARGET_BRANCH'!"
+    exit 0
+fi
 
 # --- Handle Clean Up Flag ---
 if [[ "$1" == "-c" || "$1" == "--clean" ]]; then
@@ -113,13 +131,17 @@ if [ -d "$REPO_ROOT/vendor/bundle" ] && [ ! -d "$WORKTREE_DIR/vendor/bundle" ]; 
     echo "  └─ Linked vendor/bundle"
 fi
 
-# --- 3. Launch Claude Code ---
+# --- 3. Auto-point Docker to current worktree branch ---
+echo "🐳 Auto-pointing main directory to '$BRANCH_NAME' for Docker..."
+(cd "$REPO_ROOT" && git checkout "$BRANCH_NAME" 2>/dev/null || true)
+
+# --- 4. Launch Claude Code ---
 echo "⚡ Launching Claude Code in isolated worktree..."
 echo "------------------------------------------------"
 cd "$WORKTREE_DIR"
 claude
 
-# --- 4. Post-Session Cleanup Prompt ---
+# --- 5. Post-Session Cleanup Prompt ---
 echo "------------------------------------------------"
 read -p "❓ Do you want to remove this worktree now? (y/N): " -n 1 -r
 echo
