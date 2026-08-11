@@ -1,4 +1,4 @@
-#!/bin/env bash
+#!/usr/bin/env bash
 
 # ==============================================================================
 # claude-wt: Automated Git Worktree manager for Claude Code CLI
