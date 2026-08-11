@@ -36,9 +36,38 @@ if [[ "$1" == "-u" || "$1" == "--update" ]]; then
 fi
 
 # Ensure we're inside a Git repository
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+git rev-parse --git-dir >/dev/null 2>&1 || {
     echo "❌ Error: Must be run inside a Git repository."
     exit 1
+}
+
+# The MAIN working tree — the folder Docker mounts — even when this script is run
+# from inside a linked worktree. `git rev-parse --show-toplevel` would return the
+# worktree itself, so every path below (.worktrees/, the Docker checkout, the symlink
+# sources) would silently point at the wrong place. `git worktree list` reports the
+# main working tree first, always.
+REPO_ROOT=$(git worktree list --porcelain | awk 'NR==1 && $1 == "worktree" { print substr($0, 10); exit }')
+REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
+
+# Point the main checkout at a branch. A branch that is already checked out in a
+# linked worktree needs --ignore-other-worktrees — which is the normal case here,
+# since the whole point is to serve the branch you are working on in a worktree.
+point_docker_to() {
+    local branch="$1"
+    (cd "$REPO_ROOT" && { git checkout "$branch" 2>/dev/null || git checkout --ignore-other-worktrees "$branch"; })
+}
+
+# The Docker folder serves the branch's last COMMIT. Anything still uncommitted in
+# that branch's worktree is not what the container runs.
+warn_if_uncommitted() {
+    local branch="$1"
+    local worktree="$REPO_ROOT/.worktrees/$branch"
+
+    [ -d "$worktree" ] || return 0
+    [ -n "$(git -C "$worktree" status --porcelain)" ] || return 0
+
+    echo "⚠️  '$worktree' has uncommitted changes."
+    echo "   Docker serves the last commit of '$branch' — commit them, or they will not run."
 }
 
 # --- Handle Docker Target Flag ---
@@ -49,9 +78,10 @@ if [[ "$1" == "-d" || "$1" == "--docker-target" ]]; then
         show_usage
         exit 1
     fi
-    echo "🐳 Pointing main Docker folder to: '$TARGET_BRANCH'..."
-    (cd "$REPO_ROOT" && git checkout "$TARGET_BRANCH")
+    echo "🐳 Pointing main Docker folder to: '$TARGET_BRANCH' ($REPO_ROOT)..."
+    point_docker_to "$TARGET_BRANCH"
     echo "✅ Docker container is now reading code from branch '$TARGET_BRANCH'!"
+    warn_if_uncommitted "$TARGET_BRANCH"
     exit 0
 fi
 
@@ -133,7 +163,7 @@ fi
 
 # --- 3. Auto-point Docker to current worktree branch ---
 echo "🐳 Auto-pointing main directory to '$BRANCH_NAME' for Docker..."
-(cd "$REPO_ROOT" && git checkout "$BRANCH_NAME" 2>/dev/null || true)
+point_docker_to "$BRANCH_NAME" || echo "  └─ ⚠️ Could not switch $REPO_ROOT to '$BRANCH_NAME'."
 
 # --- 4. Launch Claude Code ---
 echo "⚡ Launching Claude Code in isolated worktree..."
