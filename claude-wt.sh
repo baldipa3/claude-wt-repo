@@ -29,7 +29,7 @@ EOF
 # --- Handle Update Flag ---
 if [[ "$1" == "-u" || "$1" == "--update" ]]; then
     echo "🔄 Updating claude-wt from GitHub..."
-    curl -fsSL https://raw.githubusercontent.com/baldipa3/claude-wt-repo/main/claude-wt.sh -o ~/.local/bin/claude-wt
+    curl -fsSL https://raw.githubusercontent.com/baldipa3/claude-wt-repo/refs/heads/main/claude-wt.sh -o ~/.local/bin/claude-wt
     chmod +x ~/.local/bin/claude-wt
     echo "✨ claude-wt has been updated to the latest version!"
     exit 0
