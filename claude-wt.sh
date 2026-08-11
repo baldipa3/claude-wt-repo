@@ -22,6 +22,15 @@ Examples:
 EOF
 }
 
+# --- Handle Update Flag ---
+if [[ "$1" == "-u" || "$1" == "--update" ]]; then
+    echo "🔄 Updating claude-wt from GitHub..."
+    curl -fsSL https://raw.githubusercontent.com/baldipa3/claude-wt-repo/main/claude-wt.sh -o ~/.local/bin/claude-wt
+    chmod +x ~/.local/bin/claude-wt
+    echo "✨ claude-wt has been updated to the latest version!"
+    exit 0
+fi
+
 # Ensure we're inside a Git repository
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "❌ Error: Must be run inside a Git repository."
