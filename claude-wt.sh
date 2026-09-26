@@ -51,7 +51,28 @@ REPO_ROOT=$(git worktree list --porcelain | awk 'NR==1 && $1 == "worktree" { pri
 REPO_ROOT="${REPO_ROOT:-$(git rev-parse --show-toplevel)}"
 
 # --- Docker wiring (override per project via the environment) ---
-COMPOSE_DIR="${CLAUDE_WT_COMPOSE_DIR:-$REPO_ROOT/../platform}"
+has_compose_file() {
+    local dir="$1" name
+    for name in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+        [ -f "$dir/$name" ] && return 0
+    done
+    return 1
+}
+
+# The compose file lives in platform/development, and Compose reads that folder's .env,
+# so LABNET_PATH must be written there. platform/ is kept as a fallback for older layouts.
+default_compose_dir() {
+    local dir
+    for dir in "$REPO_ROOT/../platform/development" "$REPO_ROOT/../platform"; do
+        if has_compose_file "$dir"; then
+            (cd "$dir" && pwd)
+            return
+        fi
+    done
+    echo "$REPO_ROOT/../platform/development"
+}
+
+COMPOSE_DIR="${CLAUDE_WT_COMPOSE_DIR:-$(default_compose_dir)}"
 COMPOSE_PROJECT="${CLAUDE_WT_COMPOSE_PROJECT:-gmpilot-net}"
 COMPOSE_SERVICE="${CLAUDE_WT_COMPOSE_SERVICE:-rails}"
 PATH_VAR="${CLAUDE_WT_PATH_VAR:-LABNET_PATH}"
@@ -100,9 +121,9 @@ point_docker_to() {
     local target="$1"
     local env_file="$COMPOSE_DIR/.env"
 
-    if [ ! -d "$COMPOSE_DIR" ]; then
-        echo "❌ Error: compose directory not found at '$COMPOSE_DIR'."
-        echo "   Set CLAUDE_WT_COMPOSE_DIR to point at it."
+    if ! has_compose_file "$COMPOSE_DIR"; then
+        echo "❌ Error: no compose file found in '$COMPOSE_DIR'."
+        echo "   Set CLAUDE_WT_COMPOSE_DIR to the folder that holds docker-compose.yml."
         return 1
     fi
 
